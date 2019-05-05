@@ -1,4 +1,5 @@
 import java.util.concurrent.Executors
+import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
 
 import cats.instances.future._
@@ -8,17 +9,19 @@ import com.bot4s.telegram.api.declarative.Commands
 import com.bot4s.telegram.clients.FutureSttpClient
 import com.bot4s.telegram.future.Polling
 import com.bot4s.telegram.future.TelegramBot
+import com.bot4s.telegram.models.Message
 import slogging.{LogLevel, LoggerConfig, PrintLoggerFactory}
 import com.softwaremill.sttp.okhttp.OkHttpFutureBackend
 import com.github.nscala_time.time.Imports._
 import com.github.nscala_time.time.Imports.DateTime.now
+import org.joda.time.Hours
 
 import scala.collection.mutable
 import scala.concurrent.Future
 
-class TaskManagerBot(val token: String) extends TelegramBot
+class TaskManagerBot(val token: String, val file: String) extends TelegramBot
   with Polling
-  with PerChatState[mutable.Set[String]]
+  with PerChatState[mutable.Set[Task]]
   with Commands[Future] {
 
   LoggerConfig.factory = PrintLoggerFactory()
@@ -27,72 +30,69 @@ class TaskManagerBot(val token: String) extends TelegramBot
   implicit val backend = OkHttpFutureBackend()
   override val client: RequestHandler[Future] = new FutureSttpClient(token)
 
-  val sc = Executors.newScheduledThreadPool(10)
-  val emptyRunnable = () => ()
+  private var scheduler: ScheduledFuture[_] = null
+
+  def initScheduler(implicit msg: Message) = withChatState {
+    case Some(tasks) =>
+      scheduler = Executors.newScheduledThreadPool(10).scheduleAtFixedRate(() => {
+        for (task <- tasks) {
+          if(now > task.expire && now.getHourOfDay > 7 && now.getHourOfDay < 24 && now.getMinuteOfHour < 10) reply {
+            s"""
+               |Задача просрочена!
+               |${task.title}
+               |Должна была быть выполнена до ${task.expire}
+            """.stripMargin}.void
+          if(task.remind <= now && now <= task.remind + Hours.ONE) reply {
+            s"""
+               |Напоминание о задаче!
+               |$task
+               |Должна быть выполнена до ${task.expire}
+            """.stripMargin}.void
+        }
+      }, 0L, 10L, TimeUnit.MINUTES)
+      reply("\n").void
+    case _ => reply("Tasks doesn't found.").void
+  }
 
   onCommand("init" | "start"){ implicit msg =>
-    withChatState{
+    withChatState {
       case None =>
-        setChatState(mutable.Set.empty[String])
+        setChatState(mutable.Set.empty[Task])
+        initScheduler
         reply("TaskManager Bot initialized").void
       case Some(_) =>
+        initScheduler
         reply("TaskManager Bot already initialized. For reinitialization please use /reinit").void
     }
   }
 
   onCommand("reinit" | "clean"){ implicit msg =>
-    setChatState(mutable.Set.empty[String])
+    setChatState(mutable.Set.empty[Task])
+    scheduler.cancel(true)
+    initScheduler
     reply("TaskManager Bot reinitialized").void
   }
 
   onCommand("add" | "edit"){ implicit msg =>
     withArgs {
       case message if message.length >= 3 => withChatState {
-        case Some(tasks) =>
-          try {
-            val date = DateTime.parse(message.head)
-            val remainder = DateTime.parse(message(1))
-            val task = message.drop(2).mkString(" ")
+        case Some(tasks) => try {
+          val task = Task(
+            title = message.drop(2).mkString(" "),
+            remind = DateTime.parse(message(1)),
+            expire = DateTime.parse(message.head))
 
-            tasks += task
+          tasks += task
 
-            val remainderDuration = Duration.millis((now to remainder).toDurationMillis).toScalaDuration
-
-            sc.schedule(() =>
-              if (tasks contains task) reply {
-                s"""
-                   |Напоминание о задаче!
-                   |$task
-                """.stripMargin}.void, remainderDuration.length, remainderDuration.unit)
-
-            val estimateDuration = Duration.millis((now to date).toDurationMillis).toScalaDuration
-
-            sc.schedule(() =>
-              if (tasks contains task) {
-                def loop: Unit = sc.schedule(() => if (tasks contains task) {
-                  reply {
-                    s"""
-                       |Задача просрочена!
-                       |$task
-                    """.stripMargin
-                  }.void
-                  loop
-                } else emptyRunnable, 1L, TimeUnit.HOURS)
-
-                loop
-                emptyRunnable
-              }, estimateDuration.length, estimateDuration.unit)
-
-
-            reply(
-              s"""
-                 |Задача: $task
-                 |Дата завершения задачи: $date
-                 |Напоминание установлено на: $remainder
-              """.stripMargin).void
-          } catch {
-            case e: Exception => reply(s"Failed because: ${e.getMessage}").void
-          }
+          reply(
+            s"""
+               |Задача: ${task.title}
+               |Дата завершения задачи: ${task.expire}
+               |Напоминание установлено на: ${task.remind}
+            """.stripMargin).void
+        } catch {
+          case e: Exception => reply(s"Failed because: ${e.getMessage}").void
+        }
         case None => reply("ERROR! Chat state -- broken. Please /init bot or /reinit. \nFor advanced help contact to administrator.").void
       }
       case _ => reply("Invalid argumentヽ(ಠ_ಠ)ノ").void
@@ -103,9 +103,14 @@ class TaskManagerBot(val token: String) extends TelegramBot
     withArgs{
       case message => withChatState {
         case Some(tasks) =>
-          val task = message.mkString(" ")
-          tasks -= message.mkString(" ")
-          reply(s"Deleted: $task").void
+          val title = message.mkString(" ")
+          tasks.filter(_.title == title).headOption match {
+            case Some(task) =>
+              tasks.remove(task)
+              reply(s"Deleted: $title").void
+            case None =>
+              reply("Task not exists").void
+          }
         case None => reply("ERROR! Chat state -- broken. Please /init bot or /reinit. \nFor advanced help contact to administrator.").void
       }
       case _ => reply("Invalid argumentヽ(ಠ_ಠ)ノ").void
@@ -114,7 +119,7 @@ class TaskManagerBot(val token: String) extends TelegramBot
 
   onCommand("list"){ implicit msg =>
     withChatState {
-      case Some(tasks) => reply(s"Список задач:\n ${tasks.mkString(";\n")}").void
+      case Some(tasks) => reply(s"Список задач:\n ${tasks.map(_.title).mkString(";\n")}").void
       case None => reply("ERROR! Chat state -- broken. Please /init bot or /reinit. \nFor advanced help contact to administrator.").void
     }
   }
