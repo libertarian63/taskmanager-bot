@@ -17,3 +17,7 @@ sbt assembly
 ```shell
 java -jar taskmanager-bot-assembly-0.1.0-SNAPSHOT.jar <bot_token> <file_for_state_store>
 ```
+
+## TODO:
+
+* Автоматическое восстановление планировщика(сейчас восстанавливается после произвольного сообщения)

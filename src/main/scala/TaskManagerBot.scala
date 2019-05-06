@@ -14,7 +14,7 @@ import slogging.{LogLevel, LoggerConfig, PrintLoggerFactory}
 import com.softwaremill.sttp.okhttp.OkHttpFutureBackend
 import com.github.nscala_time.time.Imports._
 import com.github.nscala_time.time.Imports.DateTime.now
-import org.joda.time.Hours
+import org.joda.time.Minutes._
 
 import scala.collection.mutable
 import scala.concurrent.Future
@@ -29,7 +29,6 @@ class TaskManagerBot(val token: String, val file: String) extends TelegramBot
 
   implicit val backend = OkHttpFutureBackend()
   override val client: RequestHandler[Future] = new FutureSttpClient(token)
-
   private var scheduler: ScheduledFuture[_] = null
 
   def initScheduler(implicit msg: Message) = withChatState {
@@ -42,16 +41,23 @@ class TaskManagerBot(val token: String, val file: String) extends TelegramBot
                |${task.title}
                |Должна была быть выполнена до ${task.expire}
             """.stripMargin}.void
-          if(task.remind <= now && now <= task.remind + Hours.ONE) reply {
+          if(task.remind <= now && now <= task.remind + minutes(10)) reply {
             s"""
                |Напоминание о задаче!
-               |$task
+               |${task.title}
                |Должна быть выполнена до ${task.expire}
             """.stripMargin}.void
         }
       }, 0L, 10L, TimeUnit.MINUTES)
-      reply("\n").void
+      monad.pure(())
     case _ => reply("Tasks doesn't found.").void
+  }
+
+  onMessage { implicit msg =>
+    if (scheduler == null || scheduler.isCancelled) {
+      initScheduler
+      reply("Scheduler restored").void
+    } else monad.pure(())
   }
 
   onCommand("init" | "start"){ implicit msg =>
@@ -119,7 +125,7 @@ class TaskManagerBot(val token: String, val file: String) extends TelegramBot
 
   onCommand("list"){ implicit msg =>
     withChatState {
-      case Some(tasks) => reply(s"Список задач:\n ${tasks.map(_.title).mkString(";\n")}").void
+      case Some(tasks) => reply(s"Список задач: \n${tasks.map(_.title).mkString(";\n")}").void
       case None => reply("ERROR! Chat state -- broken. Please /init bot or /reinit. \nFor advanced help contact to administrator.").void
     }
   }
