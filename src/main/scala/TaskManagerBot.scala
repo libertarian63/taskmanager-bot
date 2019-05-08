@@ -33,6 +33,7 @@ class TaskManagerBot(val token: String, val file: String) extends TelegramBot
 
   def initScheduler(implicit msg: Message) = withChatState {
     case Some(tasks) =>
+      if(scheduler != null) scheduler.cancel(true)
       scheduler = Executors.newScheduledThreadPool(10).scheduleAtFixedRate(() => {
         for (task <- tasks) {
           if(now > task.expire && now.getHourOfDay > 7 && now.getHourOfDay < 24 && now.getMinuteOfHour < 10) reply {
